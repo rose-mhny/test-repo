@@ -1,7 +1,14 @@
 #!/bin/bash
 
-SCHEDULE_FILE="schedule.txt"
-touch "$SCHEDULE_FILE"
+JSON_FILE="shifts.json"
+touch "$JSON_FILE"
+if [ ! -s "$JSON_FILE" ]; then
+    echo "{}" > "$JSON_FILE"
+fi
+
+# Valid shifts and teams
+valid_shifts=("morning" "mid" "night")
+valid_teams=("a1" "a2" "a3" "b1" "b2" "b3")
 
 # Function to center text
 center() {
@@ -27,15 +34,20 @@ print_schedule() {
 
     # Find max employee list length
     max_emp=0
-    for key in $(cut -d',' -f1,2 "$SCHEDULE_FILE" | sort -u); do
-        # Collect all employees for this team+shift
-        employees=$(grep "^$key," "$SCHEDULE_FILE" | cut -d',' -f3 | paste -sd ", ")
-        length=${#employees}
-
-        # Update max if this list is longer
-        if [ $length -gt $max_emp ]; then
-            max_emp=$length
-        fi
+    for team in "${valid_teams[@]}"; do
+        for shift in "${valid_shifts[@]}"; do
+            employees=$(jq -r --arg t "$team" --arg s "$shift" '
+                if .[$t][$s] and (.[$t][$s] | length) > 0 then
+                    .[$t][$s] | join(", ")
+                else
+                    empty
+                end
+            ' "$JSON_FILE")
+            length=${#employees}
+            if [ $length -gt $max_emp ]; then
+                max_emp=$length
+            fi
+        done
     done
 
     # Adjust column width if needed
@@ -62,66 +74,101 @@ print_schedule() {
         "$(printf '═%.0s' $(seq 1 $width_emp))"
 
     # Rows
-    for team in $(cut -d',' -f1 "$SCHEDULE_FILE" | sort -u); do
-        for shift in morning mid night; do
-            employees=$(grep "^$team,$shift," "$SCHEDULE_FILE" | cut -d',' -f3 | paste -sd ", " - | sed 's/,/, /g')
-            if [ -n "$employees" ]; then
-                printf "║%s║%s║%s║\n" \
-                    "$(center "$team" $width_team)" \
-                    "$(center "$shift" $width_shift)" \
-                    "$(center "$employees" $width_emp)"
+    rows=()
+    for team in "${valid_teams[@]}"; do
+        for shift in "${valid_shifts[@]}"; do
+            employees=$(jq -r --arg t "$team" --arg s "$shift" '
+                if .[$t][$s] and (.[$t][$s] | length) > 0 then
+                    .[$t][$s] | join(", ")
+                else
+                    empty
+                end
+            ' "$JSON_FILE")
+            if [[ -n "$employees" ]]; then
+                rows+=("║$(center "$team" $width_team)║$(center "$shift" $width_shift)║$(center "$employees" $width_emp)║")
             fi
         done
+    done
 
-        # Divider between teams, except after the last team
-        if [ "$team" != "$(cut -d',' -f1 "$SCHEDULE_FILE" | sort -u | tail -1)" ]; then
+    # Print rows with dividers
+    for i in "${!rows[@]}"; do
+        echo -e "${rows[$i]}"
+        if [[ $i -lt $((${#rows[@]} - 1)) ]]; then
             printf "╠%s╬%s╬%s╣\n" \
-                "$(printf '═%.0s' $(seq 1 $width_team))" \
-                "$(printf '═%.0s' $(seq 1 $width_shift))" \
-                "$(printf '═%.0s' $(seq 1 $width_emp))"
-        else
-        # Bottom border
-            printf "╚%s╩%s╩%s╝\n" \
-                "$(printf '═%.0s' $(seq 1 $width_team))" \
-                "$(printf '═%.0s' $(seq 1 $width_shift))" \
-                "$(printf '═%.0s' $(seq 1 $width_emp))"
+                "$(printf '─%.0s' $(seq 1 $width_team))" \
+                "$(printf '─%.0s' $(seq 1 $width_shift))" \
+                "$(printf '─%.0s' $(seq 1 $width_emp))"
         fi
     done
+
+    # Bottom border
+    printf "╚%s╩%s╩%s╝\n" \
+        "$(printf '═%.0s' $(seq 1 $width_team))" \
+        "$(printf '═%.0s' $(seq 1 $width_shift))" \
+        "$(printf '═%.0s' $(seq 1 $width_emp))"
+
+    echo -e "\nPress Enter to continue..."
+    read
+    echo -e ""
 }
 
 while true; do
-    read -p "Enter Employee name (or 'print' to display schedule, 'exit' to quit): " name
+    read -p "Enter Employee name (or 'print' to display schedule, 'remove' to delete, 'exit' to quit): " name
+    name=$(echo "$name" | sed 's/^ *//;s/ *$//' | tr '[:upper:]' '[:lower:]')
+
     if [[ "$name" == "exit" ]]; then
         break
     fi
 
     if [[ "$name" == "print" ]]; then
         print_schedule
-        break
+        continue
     fi
 
+    if [[ "$name" == "remove" ]]; then
+        read -p "Enter Team to remove from (a1/a2/a3/b1/b2/b3): " team
+        team=$(echo "$team" | tr '[:upper:]' '[:lower:]')
+        [[ ! " ${valid_teams[*]} " =~ " $team " ]] && { echo -e "${RED}❌ Invalid team.${RESET}\n"; continue; }
+
+        read -p "Enter Shift to remove from (morning/mid/night): " shift
+        shift=$(echo "$shift" | tr '[:upper:]' '[:lower:]')
+        [[ ! " ${valid_shifts[*]} " =~ " $shift " ]] && { echo -e "${RED}❌ Invalid shift.${RESET}\n"; continue; }
+
+        read -p "Enter Employee name to remove: " emp
+        emp=$(echo "$emp" | sed 's/^ *//;s/ *$//' | tr '[:upper:]' '[:lower:]')
+
+        exists=$(jq --arg t "$team" --arg s "$shift" --arg n "$emp" '.[$t][$s] | index($n)' "$JSON_FILE")
+        if [[ "$exists" == "null" ]]; then
+            echo -e "${RED}❌ Employee $emp not found in $team $shift.${RESET}\n"
+            continue
+        fi
+
+        jq --arg t "$team" --arg s "$shift" --arg n "$emp" '.[$t][$s] -= [$n]' "$JSON_FILE" > tmp.json && mv tmp.json "$JSON_FILE"
+        echo -e "${GREEN}✅ Removed $emp from team $team ($shift shift).${RESET}\n"
+        continue
+    fi
+
+    # Adding employee
     read -p "Enter Shift (morning/mid/night): " shift
     shift=$(echo "$shift" | tr '[:upper:]' '[:lower:]')
-    if [[ ! "$shift" =~ ^(morning|mid|night)$ ]]; then
-        echo -e "❌ Invalid shift. Must be: morning, mid, or night.\n"
-        break
-    fi
+    [[ ! " ${valid_shifts[*]} " =~ " $shift " ]] && { echo -e "${RED}❌ Invalid shift.${RESET}\n"; continue; }
 
     read -p "Enter Team (a1/a2/a3/b1/b2/b3): " team
     team=$(echo "$team" | tr '[:upper:]' '[:lower:]')
-    if [[ ! "$team" =~ ^(a1|a2|a3|b1|b2|b3)$ ]]; then
-        echo -e "❌ Invalid team. Must be one of: a1, a2, a3, b1, b2, b3.\n"
-        break
-    fi
+    [[ ! " ${valid_teams[*]} " =~ " $team " ]] && { echo -e "${RED}❌ Invalid team.${RESET}\n"; continue; }
 
-    count=$(grep -c "^$team,$shift," "$SCHEDULE_FILE")
-    if (( count >= 2 )); then
-        echo -e "❌ Error: Maximum employees per shift in team $team reached. Exiting...\n"
-        break
-    fi
+    # Initialize JSON
+    jq --arg t "$team" --arg s "$shift" 'if .[$t]==null then .[$t]={} else . end | if .[$t][$s]==null then .[$t][$s]=[] else . end' "$JSON_FILE" > tmp.json && mv tmp.json "$JSON_FILE"
 
-    echo "$team,$shift,$name" >> "$SCHEDULE_FILE"
-    echo -e "✅ Assigned $name to team $team ($shift shift).\n"
+    # Shift limit
+    count=$(jq --arg t "$team" --arg s "$shift" '.[$t][$s] | length' "$JSON_FILE")
+    (( count >= 2 )) && { echo -e "${RED}❌ Error: Maximum employees per shift in team $team reached.${RESET}\n"; continue; }
+
+    # Duplicate check
+    exists=$(jq --arg t "$team" --arg s "$shift" --arg n "$name" '.[$t][$s] | index($n)' "$JSON_FILE")
+    [[ "$exists" != "null" ]] && { echo -e "${RED}❌ Error: $name already assigned to $team $shift.${RESET}\n"; continue; }
+
+    # Add employee
+    jq --arg t "$team" --arg s "$shift" --arg n "$name" '.[$t][$s] += [$n]' "$JSON_FILE" > tmp.json && mv tmp.json "$JSON_FILE"
+    echo -e "${GREEN}✅ Assigned $name to team $team ($shift shift).${RESET}\n"
 done
-
-
