@@ -23,6 +23,12 @@ while true; do
         break
     fi
 
+    count=$(grep -c "^$team,$shift," "$SCHEDULE_FILE")
+    if (( count >= 2 )); then
+        echo -e "❌ Error: Maximum employees per shift in team $team reached. Exiting...\n"
+        break
+    fi
+
     echo "$team,$shift,$name" >> "$SCHEDULE_FILE"
     echo -e "✅ Assigned $name to team $team ($shift shift).\n"
 done
